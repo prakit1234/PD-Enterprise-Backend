@@ -12,33 +12,39 @@ import { notesdb } from './db/cnotes'
 import { notes } from "./db/cnotes/schema"
 import Groq from 'groq-sdk'
 import dotenv from 'dotenv'
+import type { Context } from 'hono'
 dotenv.config() // Load environment variables from .env file
+
+interface ChatMessage {
+    role: string;
+    content: string;
+}
 
 // VARIABLES
 // Create a new Hono application instance
 const app = new Hono()
-let chatHistory: any = []
-const initial_socratic_message = {
-    "role": "user",
-    "content": `You are a Socratic Teacher. And I am your student. And please try to keep your replies as brief as possible, while explaining each topic carefully. Please Explain the topic in relation to the NCERT CBSE 2024 curriculum. Please don't give the answer directly but rather a starting point to get started, your job is to help the student find the answer in his/her own way.
-Also please return your answer in HTML format, with proper tags.`,
+let chatHistory: ChatMessage[] = []
+const initial_socratic_message: ChatMessage = {
+    role: "user",
+    content: `You are a Socratic Teacher. And I am your student. And please try to keep your replies as brief as possible, while explaining each topic carefully. Please Explain the topic in relation to the NCERT CBSE 2024 curriculum. Please don't give the answer directly but rather a starting point to get started, your job is to help the student find the answer in his/her own way.
+Also please return your answer in HTML format, with proper tags.`
 }
-const initial_message = {
-    "role": "user",
-    "content": `Please return your answer in HTML format, with proper tags, only send inside the <body> tags, no need for the boilerplate or <body> tag.
-        always return your whole answer strictly in the following json syntax: {summary: "[a short summary in a few words of the prompt"]", content: "[your response]"}`,
+const initial_message: ChatMessage = {
+    role: "user",
+    content: `Please return your answer in HTML format, with proper tags, only send inside the <body> tags, no need for the boilerplate or <body> tag.
+        always return your whole answer strictly in the following json syntax: {summary: "[a short summary in a few words of the prompt"]", content: "[your response]"}`
 }
 let chatCompletion: any
 
 // FUNCTIONS
-async function chatWithHistory(userMessage: string, modal: string, groq: any, modalParams: any) {
+async function chatWithHistory(userMessage: string, modal: string, groq: any, modalParams: { type: string }): Promise<string | undefined> {
     chatHistory = [...chatHistory, { role: "user", content: userMessage }]
-    if (modalParams.type == "custom") {
+    if (modalParams.type === "custom") {
         chatCompletion = await groq.chat.completions.create({
             messages: [...chatHistory, initial_socratic_message],
             model: modal
         })
-    } else if (modalParams.type == "direct") {
+    } else if (modalParams.type === "direct") {
         chatCompletion = await groq.chat.completions.create({
             messages: [...chatHistory, initial_message],
             model: modal
@@ -66,14 +72,14 @@ app.notFound((c) => {
     })
 })
 // Define a route for handling errors
-app.onError((err, c) => {
-    c.status(500) // Set the HTTP status code to 500 (Internal Server Error)
+app.onError((err: Error, c: Context) => {
+    console.error(`${err.message}\n${err.stack}`)
     return c.json({
-        status: 500, // Status code
-        message: "Internal Server Error", // Error message
+        status: 500,
+        message: "Internal Server Error",
         data: null,
-        error: err, // The error object
-    }) // Return a JSON response
+        error: err.message
+    }, 500)
 })
 // Apply CORS middleware to all routes
 app.use("*", cors())
@@ -114,7 +120,7 @@ app.get("/pd-enterprise/blog/posts/:slug", async (c) => {
 })
 
 // USER MANAGEMENT API ROUTES
-app.post("/users/roles/get-role", async (c) => {
+app.post("/users/roles/get-role", async (c: Context) => {
     if (validateRoute(c.req.header("origin") || "")) {
         const body = await c.req.json()
         if (!body.email) {
@@ -124,34 +130,62 @@ app.post("/users/roles/get-role", async (c) => {
         const email = body.email
         try {
             const role = await db.select({ role: users.membership }).from(users).where(eq(users.email, email))
-            if (role[0].role == null || undefined
-                || ""
-            ) {
-                const role = await db.update(users).set({ membership: "tier-1" }).where(eq(users.email, email))
-                return c.json({ status: 200, message: "Role updated successfully", data: "tier-1", error: null })
+            
+            // If no user found
+            if (role.length === 0) {
+                c.status(404)
+                return c.json({ 
+                    status: 404, 
+                    message: "User not found", 
+                    data: null, 
+                    error: null 
+                })
             }
-            else {
-                return c.json({ status: 200, message: "Role found successfully", data: role[0].role, error: null })
+
+            // If role is null, undefined, or empty string
+            if (!role[0].role || role[0].role === "") {
+                const updatedUser = await db.update(users)
+                    .set({ membership: "tier-1" })
+                    .where(eq(users.email, email))
+                    .returning()
+
+                return c.json({ 
+                    status: 200, 
+                    message: "Role updated successfully", 
+                    data: "tier-1", 
+                    error: null 
+                })
             }
+
+            return c.json({ 
+                status: 200, 
+                message: "Role found successfully", 
+                data: role[0].role, 
+                error: null 
+            })
         } catch (error) {
             console.error(error)
             c.status(500)
-            return c.json({ status: 500, message: "There was an error", data: null, error })
+            return c.json({ 
+                status: 500, 
+                message: "Database error while fetching/updating role", 
+                data: null, 
+                error 
+            })
         }
-    }
-    else {
-        c.status(500)
-        return c.json({ status: 500, message: "Origin not allowed", data: null, error: null })
+    } else {
+        c.status(403)
+        return c.json({ status: 403, message: "Origin not allowed", data: null, error: null })
     }
 })
 
 // CNOTES API ROUTES
-app.post("/notes/notes", async (c) => {
+app.post("/notes/notes", async (c: Context) => {
     if (validateRoute(c.req.header("origin") || "")) {
         const body = await c.req.json()
         if (!body.email) {
             c.status(400)
-            return c.json({ status: 400, message: "Missing required fields", data: null, error: null })
+            return c.json({ status: 400, message: "Missing required fields: email", data: null, error: null })
         }
         const email = body.email
         try {
@@ -160,39 +194,283 @@ app.post("/notes/notes", async (c) => {
         } catch (error) {
             console.error(error)
             c.status(500)
-            return c.json({ status: 500, message: "There was an error", data: null, error })
+            return c.json({ status: 500, message: "Database error while fetching notes", data: null, error })
         }
     } else {
-        c.status(500)
-        return c.json({ status: 500, message: "Origin not allowed", data: null, error: null })
+        c.status(403)
+        return c.json({ status: 403, message: "Origin not allowed", data: null, error: null })
     }
 })
-app.post("/notes/note/text/:slug", async (c) => {
+
+app.post("/notes/create", async (c: Context) => {
     if (validateRoute(c.req.header("origin") || "")) {
         const body = await c.req.json()
+        const requiredFields = ['title', 'slug', 'notecontent', 'subject', 'grade', 'email']
+        const missingFields = requiredFields.filter(field => !body[field])
+        
+        if (missingFields.length > 0) {
+            c.status(400)
+            return c.json({ 
+                status: 400, 
+                message: `Missing required fields: ${missingFields.join(', ')}`, 
+                data: null, 
+                error: null 
+            })
+        }
+
         try {
-            if (!body.slug) {
-                c.status(400)
-                return c.json({ status: 400, message: "Missing required fields", data: null, error: null })
-            }
-            const email = body.email
-            const slug = body.slug
             const userExists = await checkUserExits(body.email)
             if (!userExists) {
                 c.status(404)
                 return c.json({ status: 404, message: "User doesn't exist", data: null, error: null })
             }
 
-            const note = await notesdb.select().from(notes).where(eq(notes.slug, slug))
-            return c.json({ status: 200, message: "Successfully found note", data: note, error: null })
+            const newNote = await notesdb.insert(notes).values({
+                title: body.title,
+                slug: body.slug,
+                notecontent: body.notecontent,
+                subject: body.subject,
+                grade: body.grade,
+                userEmail: body.email,
+                board: body.board || null,
+                school: body.school || null,
+                dateCreated: new Date(),
+                dateUpdated: new Date()
+            }).returning()
+
+            return c.json({ 
+                status: 201, 
+                message: "Note created successfully", 
+                data: newNote[0], 
+                error: null 
+            })
+        } catch (error: any) {
+            console.error(error)
+            if (error.code === '23505') { // Unique constraint violation
+                c.status(409)
+                return c.json({ 
+                    status: 409, 
+                    message: "A note with this slug already exists", 
+                    data: null, 
+                    error: null 
+                })
+            }
+            c.status(500)
+            return c.json({ 
+                status: 500, 
+                message: "Database error while creating note", 
+                data: null, 
+                error 
+            })
+        }
+    } else {
+        c.status(403)
+        return c.json({ status: 403, message: "Origin not allowed", data: null, error: null })
+    }
+})
+
+app.put("/notes/update/:slug", async (c: Context) => {
+    if (validateRoute(c.req.header("origin") || "")) {
+        const slug = c.req.param("slug")
+        const body = await c.req.json()
+        
+        if (!body.email) {
+            c.status(400)
+            return c.json({ 
+                status: 400, 
+                message: "Missing required field: email", 
+                data: null, 
+                error: null 
+            })
+        }
+
+        try {
+            const userExists = await checkUserExits(body.email)
+            if (!userExists) {
+                c.status(404)
+                return c.json({ status: 404, message: "User doesn't exist", data: null, error: null })
+            }
+
+            // Check if note exists and belongs to user
+            const existingNote = await notesdb.select()
+                .from(notes)
+                .where(eq(notes.slug, slug))
+                .where(eq(notes.userEmail, body.email))
+            
+            if (existingNote.length === 0) {
+                c.status(404)
+                return c.json({ 
+                    status: 404, 
+                    message: "Note not found or you don't have permission to update it", 
+                    data: null, 
+                    error: null 
+                })
+            }
+
+            const updateData: any = {}
+            const allowedFields = ['title', 'notecontent', 'subject', 'grade', 'board', 'school']
+            
+            allowedFields.forEach(field => {
+                if (body[field] !== undefined) {
+                    updateData[field] = body[field]
+                }
+            })
+            
+            if (Object.keys(updateData).length === 0) {
+                c.status(400)
+                return c.json({ 
+                    status: 400, 
+                    message: "No valid fields to update", 
+                    data: null, 
+                    error: null 
+                })
+            }
+
+            updateData.dateUpdated = new Date()
+
+            const updatedNote = await notesdb.update(notes)
+                .set(updateData)
+                .where(eq(notes.slug, slug))
+                .where(eq(notes.userEmail, body.email))
+                .returning()
+
+            return c.json({ 
+                status: 200, 
+                message: "Note updated successfully", 
+                data: updatedNote[0], 
+                error: null 
+            })
         } catch (error) {
             console.error(error)
             c.status(500)
-            return c.json({ status: 500, message: "There was an error", data: null, error })
+            return c.json({ 
+                status: 500, 
+                message: "Database error while updating note", 
+                data: null, 
+                error 
+            })
         }
     } else {
-        c.status(500)
-        return c.json({ status: 500, message: "Origin not allowed", data: null, error: null })
+        c.status(403)
+        return c.json({ status: 403, message: "Origin not allowed", data: null, error: null })
+    }
+})
+
+app.delete("/notes/delete/:slug", async (c: Context) => {
+    if (validateRoute(c.req.header("origin") || "")) {
+        const slug = c.req.param("slug")
+        const body = await c.req.json()
+        
+        if (!body.email) {
+            c.status(400)
+            return c.json({ 
+                status: 400, 
+                message: "Missing required field: email", 
+                data: null, 
+                error: null 
+            })
+        }
+
+        try {
+            const userExists = await checkUserExits(body.email)
+            if (!userExists) {
+                c.status(404)
+                return c.json({ status: 404, message: "User doesn't exist", data: null, error: null })
+            }
+
+            const deletedNote = await notesdb.delete(notes)
+                .where(eq(notes.slug, slug))
+                .where(eq(notes.userEmail, body.email))
+                .returning()
+
+            if (deletedNote.length === 0) {
+                c.status(404)
+                return c.json({ 
+                    status: 404, 
+                    message: "Note not found or you don't have permission to delete it", 
+                    data: null, 
+                    error: null 
+                })
+            }
+
+            return c.json({ 
+                status: 200, 
+                message: "Note deleted successfully", 
+                data: deletedNote[0], 
+                error: null 
+            })
+        } catch (error) {
+            console.error(error)
+            c.status(500)
+            return c.json({ 
+                status: 500, 
+                message: "Database error while deleting note", 
+                data: null, 
+                error 
+            })
+        }
+    } else {
+        c.status(403)
+        return c.json({ status: 403, message: "Origin not allowed", data: null, error: null })
+    }
+})
+
+app.post("/notes/note/text/:slug", async (c: Context) => {
+    if (validateRoute(c.req.header("origin") || "")) {
+        const slug = c.req.param("slug")
+        const body = await c.req.json()
+        
+        if (!body.email) {
+            c.status(400)
+            return c.json({ 
+                status: 400, 
+                message: "Missing required field: email", 
+                data: null, 
+                error: null 
+            })
+        }
+
+        try {
+            const userExists = await checkUserExits(body.email)
+            if (!userExists) {
+                c.status(404)
+                return c.json({ status: 404, message: "User doesn't exist", data: null, error: null })
+            }
+
+            const note = await notesdb.select()
+                .from(notes)
+                .where(eq(notes.slug, slug))
+                .where(eq(notes.userEmail, body.email))
+
+            if (note.length === 0) {
+                c.status(404)
+                return c.json({ 
+                    status: 404, 
+                    message: "Note not found or you don't have permission to view it", 
+                    data: null, 
+                    error: null 
+                })
+            }
+
+            return c.json({ 
+                status: 200, 
+                message: "Successfully found note", 
+                data: note[0], 
+                error: null 
+            })
+        } catch (error) {
+            console.error(error)
+            c.status(500)
+            return c.json({ 
+                status: 500, 
+                message: "Database error while fetching note", 
+                data: null, 
+                error 
+            })
+        }
+    } else {
+        c.status(403)
+        return c.json({ status: 403, message: "Origin not allowed", data: null, error: null })
     }
 })
 
